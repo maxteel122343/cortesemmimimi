@@ -230,12 +230,18 @@ export default function App() {
 
         try {
           if (inferredType === "video") {
-            // Simulate progress while waiting
+            // Simulate realistic progress using an asymptotic curve based on file size
+            // Larger files will progress slower
+            const factor = file.size > 100 * 1024 * 1024 ? 0.02 : 0.08;
             const progressInterval = setInterval(() => {
-              setSegments(prev => prev.map(s => s.id === newSegment.id ? {
-                ...s,
-                loadProgress: Math.min((s.loadProgress || 0) + 10, 90)
-              } : s));
+              setSegments(prev => prev.map(s => {
+                if (s.id === newSegment.id) {
+                  const current = s.loadProgress || 0;
+                  const next = current + (99 - current) * factor;
+                  return { ...s, loadProgress: Math.min(Math.round(next), 99) };
+                }
+                return s;
+              }));
             }, 500);
 
             const tempVideo = document.createElement("video");
@@ -454,6 +460,8 @@ export default function App() {
               "-vf", `scale=${exportQuality.scale}:force_original_aspect_ratio=decrease,pad=${exportQuality.scale}:(ow-iw)/2:(oh-ih)/2`,
               "-c:v", "libx264",
               "-preset", "ultrafast",
+              "-tune", "fastdecode",
+              "-threads", "4",
               "-crf", crf,
               "-c:a", "aac",
               trimmedName,
@@ -466,6 +474,8 @@ export default function App() {
               "-vf", `scale=${exportQuality.scale}:force_original_aspect_ratio=decrease,pad=${exportQuality.scale}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`,
               "-c:v", "libx264",
               "-preset", "ultrafast",
+              "-tune", "fastdecode",
+              "-threads", "4",
               "-crf", crf,
               trimmedName,
             ]);
@@ -478,6 +488,8 @@ export default function App() {
               "-i", inputName,
               "-c:v", "libx264",
               "-preset", "ultrafast",
+              "-tune", "fastdecode",
+              "-threads", "4",
               "-crf", crf,
               "-c:a", "aac",
               "-shortest",
