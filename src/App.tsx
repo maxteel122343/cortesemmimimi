@@ -45,6 +45,7 @@ import {
   FileImage,
   Zap,
   RotateCw,
+  Copy,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn, formatTime } from "@/src/lib/utils";
@@ -137,6 +138,7 @@ export default function App() {
   const [showSuccess, setShowSuccess] = useState(false);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [activeVaultVideo, setActiveVaultVideo] = useState<TrimmedVideo | null>(null);
+  const [draggedSegmentIndex, setDraggedSegmentIndex] = useState<number | null>(null);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -200,10 +202,17 @@ export default function App() {
     for (const file of Array.from(files)) {
       const url = URL.createObjectURL(file);
       
+      let inferredType: AssetType = "video";
+      if (file.type.startsWith("image/")) {
+        inferredType = file.type === "image/gif" ? "gif" : "image";
+      } else if (file.type.startsWith("audio/")) {
+        inferredType = "audio";
+      }
+      
       const newSegment: VideoSegment = {
         id: crypto.randomUUID(),
         file,
-        type,
+        type: inferredType,
         url,
         duration: 0,
         ranges: [],
@@ -220,7 +229,7 @@ export default function App() {
         let thumbnails: string[] = [];
 
         try {
-          if (type === "video" || type === "gif") {
+          if (inferredType === "video") {
             // Simulate progress while waiting
             const progressInterval = setInterval(() => {
               setSegments(prev => prev.map(s => s.id === newSegment.id ? {
@@ -236,12 +245,13 @@ export default function App() {
             thumbnails = await generateThumbnails(file, duration);
             
             clearInterval(progressInterval);
-          } else if (type === "audio") {
+          } else if (inferredType === "audio") {
             const tempAudio = new Audio(url);
             await new Promise((r) => (tempAudio.onloadedmetadata = r));
             duration = tempAudio.duration;
-          } else if (type === "image") {
-            duration = 5;
+          } else if (inferredType === "image" || inferredType === "gif") {
+            duration = 5; // Default 5 seconds for static images/gifs
+            thumbnails = Array(5).fill(url);
           }
 
           setSegments(prev => prev.map(s => s.id === newSegment.id ? {
@@ -550,6 +560,48 @@ export default function App() {
     setSegments(newSegments);
     if (activeSegmentIndex >= newSegments.length) {
       setActiveSegmentIndex(Math.max(0, newSegments.length - 1));
+    }
+  };
+
+  const duplicateSegment = (e: React.MouseEvent, index: number) => {
+    e.stopPropagation();
+    const segToCopy = segments[index];
+    const newSeg: VideoSegment = {
+      ...segToCopy,
+      id: crypto.randomUUID(),
+      ranges: segToCopy.ranges.map(r => ({ ...r, id: crypto.randomUUID() }))
+    };
+    const newSegments = [...segments];
+    newSegments.splice(index + 1, 0, newSeg);
+    setSegments(newSegments);
+  };
+
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    e.dataTransfer.setData('text/plain', index.toString());
+    e.dataTransfer.effectAllowed = 'move';
+    setDraggedSegmentIndex(index);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault(); // Necessary to allow dropping
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDrop = (e: React.DragEvent, dropIndex: number) => {
+    e.preventDefault();
+    setDraggedSegmentIndex(null);
+    const dragIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
+    if (isNaN(dragIndex) || dragIndex === dropIndex) return;
+
+    const newSegments = [...segments];
+    const [draggedItem] = newSegments.splice(dragIndex, 1);
+    newSegments.splice(dropIndex, 0, draggedItem);
+    
+    setSegments(newSegments);
+    if (activeSegmentIndex === dragIndex) {
+      setActiveSegmentIndex(dropIndex);
+    } else if (activeSegmentIndex === dropIndex) {
+      setActiveSegmentIndex(dragIndex);
     }
   };
 
@@ -1198,9 +1250,14 @@ export default function App() {
                             {segments.map((seg, sIdx) => (
                               <div 
                                 key={seg.id}
+                                draggable
+                                onDragStart={(e) => handleDragStart(e, sIdx)}
+                                onDragOver={handleDragOver}
+                                onDrop={(e) => handleDrop(e, sIdx)}
                                 className={cn(
-                                  "h-full relative border-r border-white/10 flex transition-all cursor-pointer overflow-hidden",
-                                  activeSegmentIndex === sIdx ? "bg-orange-500/10 ring-1 ring-inset ring-orange-500/50" : "opacity-40 hover:opacity-60"
+                                  "h-full relative border-r border-white/10 flex transition-all cursor-pointer overflow-hidden group/segment",
+                                  activeSegmentIndex === sIdx ? "bg-orange-500/10 ring-1 ring-inset ring-orange-500/50" : "opacity-40 hover:opacity-60",
+                                  draggedSegmentIndex === sIdx ? "opacity-20 scale-95" : ""
                                 )}
                                 style={{ width: totalOriginalDuration > 0 ? `${(seg.duration / totalOriginalDuration) * 100}%` : "0%" }}
                                 onClick={(e) => {
@@ -1224,9 +1281,17 @@ export default function App() {
                                   )}
                                 </div>
 
-                                <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/60 rounded text-[6px] font-black uppercase tracking-tighter text-white/50 z-50">
+                                <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/60 rounded text-[6px] font-black uppercase tracking-tighter text-white/50 z-50 pointer-events-none">
                                   {seg.file.name.slice(0, 15)}
                                 </div>
+
+                                <button
+                                  onClick={(e) => duplicateSegment(e, sIdx)}
+                                  className="absolute top-1 right-1 w-5 h-5 bg-black/60 hover:bg-orange-500 text-white hover:text-black rounded flex items-center justify-center opacity-0 group-hover/segment:opacity-100 transition-all z-[60]"
+                                  title="Duplicate Media"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
 
                                 {activeSegmentIndex === sIdx && (
                                   <>
@@ -1268,6 +1333,8 @@ export default function App() {
                                         step="0.01"
                                         value={activeRange.start}
                                         onChange={(e) => updateRangeStart(parseFloat(e.target.value))}
+                                        onDragStart={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                        draggable={true}
                                         className="absolute w-full h-full appearance-none bg-transparent cursor-pointer pointer-events-none [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-full [&::-webkit-slider-thumb]:bg-orange-500 z-30 [&::-webkit-slider-thumb]:rounded-none [&::-webkit-slider-thumb]:cursor-col-resize active:[&::-webkit-slider-thumb]:scale-x-150 transition-all"
                                       />
                                       <input
@@ -1277,6 +1344,8 @@ export default function App() {
                                         step="0.01"
                                         value={activeRange.end}
                                         onChange={(e) => updateRangeEnd(parseFloat(e.target.value))}
+                                        onDragStart={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                        draggable={true}
                                         className="absolute w-full h-full appearance-none bg-transparent cursor-pointer pointer-events-none [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-full [&::-webkit-slider-thumb]:bg-orange-500 z-30 [&::-webkit-slider-thumb]:rounded-none [&::-webkit-slider-thumb]:cursor-col-resize active:[&::-webkit-slider-thumb]:scale-x-150 transition-all"
                                       />
                                     </>
@@ -1294,7 +1363,7 @@ export default function App() {
                       </div>
 
                       {/* Integrated Controls Below Ruler */}
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 p-2 bg-neutral-950/50 rounded-b-xl border-x border-b border-white/5">
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-2 p-2 bg-neutral-950/50 rounded-b-xl border-x border-b border-white/5">
                         <div className="bg-neutral-900/50 p-4 rounded-lg border border-white/5 flex items-center justify-between group hover:border-orange-500/50 transition-all">
                           <div className="flex flex-col">
                             <span className="text-[8px] font-black uppercase tracking-widest opacity-30">Mark In</span>
@@ -1322,6 +1391,22 @@ export default function App() {
                             className="p-3 bg-white/5 hover:bg-orange-500 rounded-full transition-all text-white/40 hover:text-white"
                           >
                             <Scissors size={14} className="rotate-180" />
+                          </button>
+                        </div>
+
+                        <div className="bg-neutral-900/50 p-4 rounded-lg border border-white/5 flex items-center justify-between group hover:border-orange-500/50 transition-all">
+                          <div className="flex flex-col">
+                            <span className="text-[8px] font-black uppercase tracking-widest opacity-30">Copy</span>
+                            <span className="text-xl font-mono font-black italic tracking-tighter tabular-nums text-white group-hover:text-orange-500">
+                              Clone
+                            </span>
+                          </div>
+                          <button 
+                            onClick={(e) => duplicateSegment(e, activeSegmentIndex)}
+                            className="p-3 bg-white/5 hover:bg-orange-500 rounded-full transition-all text-white/40 hover:text-white"
+                            title="Duplicate active media"
+                          >
+                            <Copy size={14} />
                           </button>
                         </div>
 
@@ -1569,8 +1654,8 @@ export default function App() {
             <div className="space-y-4">
               <AnimatePresence mode="popLayout">
                 {gallery.length === 0 ? (
-                  <div className="py-12 flex flex-col items-center justify-center opacity-10 text-center gap-4 border-2 border-dashed border-white/10 rounded-3xl">
-                    <HardDrive className="w-10 h-10" />
+                  <div className="py-12 flex flex-col items-center justify-center opacity-40 hover:opacity-80 transition-opacity text-center gap-4 border-2 border-dashed border-white/10 hover:border-orange-500/30 rounded-3xl cursor-pointer">
+                    <img src="/empty-vault.png" alt="Empty Vault" className="w-16 h-16 object-contain" />
                     <p className="text-[8px] font-black uppercase tracking-[0.3em]">Vault Empty</p>
                   </div>
                 ) : (
