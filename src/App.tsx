@@ -44,6 +44,7 @@ import {
   FileAudio,
   FileImage,
   Zap,
+  RotateCw,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn, formatTime } from "@/src/lib/utils";
@@ -65,6 +66,8 @@ interface VideoSegment {
   duration: number;
   ranges: CutRange[];
   thumbnails: string[];
+  status?: 'processing' | 'ready' | 'error';
+  loadProgress?: number;
 }
 
 interface TrimmedVideo {
@@ -95,10 +98,12 @@ export default function App() {
   const isResizingSidebar = useRef(false);
   const isResizingPreview = useRef(false);
 
-  // Format & Quality State
   const [outputFormat, setOutputFormat] = useState<string>("mp4");
   const [compressionMode, setCompressionMode] = useState<"none" | "medium" | "high">("none");
   const [conversionTarget, setConversionTarget] = useState<"video" | "audio" | "gif">("video");
+  const [previewMode, setPreviewMode] = useState<"dual" | "single">("dual");
+  const [activePreviewTab, setActivePreviewTab] = useState<"source" | "preview">("source");
+  const [sidebarOrientation, setSidebarOrientation] = useState<"vertical" | "horizontal">("horizontal");
 
   const [segments, setSegments] = useState<VideoSegment[]>([]);
   const [activeSegmentIndex, setActiveSegmentIndex] = useState(0);
@@ -106,6 +111,8 @@ export default function App() {
   const [previewTime, setPreviewTime] = useState(0);
   const [isSourcePlaying, setIsSourcePlaying] = useState(false);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  
+  const isResizingTimeline = useRef(false);
   const [sourceVolume, setSourceVolume] = useState(1);
   const [previewVolume, setPreviewVolume] = useState(1);
   const [zoom, setZoom] = useState(1);
@@ -128,6 +135,8 @@ export default function App() {
 
   const [gallery, setGallery] = useState<TrimmedVideo[]>([]);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [activeVaultVideo, setActiveVaultVideo] = useState<TrimmedVideo | null>(null);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -199,6 +208,8 @@ export default function App() {
         duration: 0,
         ranges: [],
         thumbnails: [],
+        status: 'processing',
+        loadProgress: 0
       };
 
       setSegments(prev => [...prev, newSegment]);
@@ -210,11 +221,21 @@ export default function App() {
 
         try {
           if (type === "video" || type === "gif") {
+            // Simulate progress while waiting
+            const progressInterval = setInterval(() => {
+              setSegments(prev => prev.map(s => s.id === newSegment.id ? {
+                ...s,
+                loadProgress: Math.min((s.loadProgress || 0) + 10, 90)
+              } : s));
+            }, 500);
+
             const tempVideo = document.createElement("video");
             tempVideo.src = url;
             await new Promise((r) => (tempVideo.onloadedmetadata = r));
             duration = tempVideo.duration;
             thumbnails = await generateThumbnails(file, duration);
+            
+            clearInterval(progressInterval);
           } else if (type === "audio") {
             const tempAudio = new Audio(url);
             await new Promise((r) => (tempAudio.onloadedmetadata = r));
@@ -227,7 +248,9 @@ export default function App() {
             ...s,
             duration,
             ranges: [{ id: crypto.randomUUID(), start: 0, end: duration }],
-            thumbnails
+            thumbnails,
+            status: 'ready',
+            loadProgress: 100
           } : s));
         } catch (err) {
           console.error("Background processing error:", err);
@@ -235,6 +258,36 @@ export default function App() {
       })();
     }
   };
+
+  // Global Mouse Events for Resizing
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizingPreview.current) {
+        setPreviewHeight(Math.max(200, Math.min(800, e.clientY - 100)));
+      }
+      if (isResizingTimeline.current) {
+        // Adjust height relative to current container position
+        const timelineElement = document.querySelector(".timeline-container");
+        if (timelineElement) {
+          const rect = timelineElement.getBoundingClientRect();
+          setTimelineHeight(Math.max(150, Math.min(600, e.clientY - rect.top)));
+        }
+      }
+    };
+
+    const handleMouseUp = () => {
+      isResizingPreview.current = false;
+      isResizingTimeline.current = false;
+      document.body.style.cursor = "default";
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
 
   // Initialize FFmpeg
   useEffect(() => {
@@ -815,90 +868,138 @@ export default function App() {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: previewHeight }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="bg-neutral-950/80 backdrop-blur-2xl border-b border-neutral-900 shadow-2xl z-40 px-8 py-6 overflow-hidden flex flex-col"
+                  className="bg-neutral-950/80 backdrop-blur-2xl border-b border-neutral-900 shadow-2xl z-40 px-8 py-4 overflow-hidden flex flex-col"
                 >
-                  <div className="max-w-[1400px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-8 flex-1 min-h-0">
-                    {/* Source Player */}
-                    <div className="flex flex-col gap-4 min-h-0">
-                      <div className="relative flex-1 bg-black rounded-2xl overflow-hidden border border-neutral-800 group/player shadow-2xl">
-                        <video
-                          ref={videoRef}
-                          src={activeSegment?.url}
-                          className="w-full h-full object-contain"
-                          onTimeUpdate={handleSourceTimeUpdate}
-                        />
-                        <div className="absolute top-4 left-4 font-black uppercase tracking-widest text-[10px] bg-black/60 px-3 py-1 rounded border border-white/10 backdrop-blur-md">
-                          Master Source
-                        </div>
-                        <button 
-                          onClick={() => toggleFullscreen(videoRef)}
-                          className="absolute bottom-4 right-4 p-2.5 bg-black/60 hover:bg-orange-500 rounded-xl transition-all text-white opacity-0 group-hover/player:opacity-100 backdrop-blur-md border border-white/10"
-                        >
-                          <Maximize size={16} />
-                        </button>
-                      </div>
+                  {/* Mode Toggles */}
+                  <div className="flex justify-end gap-2 mb-4">
+                    <button 
+                      onClick={() => setPreviewMode(previewMode === "dual" ? "single" : "dual")}
+                      className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded-full text-[8px] font-black uppercase tracking-widest border border-white/10 transition-all flex items-center gap-2"
+                    >
+                      <Layers size={10} className="text-orange-500" />
+                      {previewMode === "dual" ? "Dual View" : "Single View"}
+                    </button>
+                    {previewMode === "single" && (
+                       <div className="flex bg-neutral-900 p-0.5 rounded-full border border-white/5">
+                         <button 
+                           onClick={() => setActivePreviewTab("source")}
+                           className={cn("px-4 py-1 rounded-full text-[8px] font-black uppercase tracking-widest transition-all", activePreviewTab === "source" ? "bg-white text-black" : "text-white/40")}
+                         >
+                           Source
+                         </button>
+                         <button 
+                           onClick={() => setActivePreviewTab("preview")}
+                           className={cn("px-4 py-1 rounded-full text-[8px] font-black uppercase tracking-widest transition-all", activePreviewTab === "preview" ? "bg-orange-500 text-black" : "text-white/40")}
+                         >
+                           Preview
+                         </button>
+                       </div>
+                    )}
+                  </div>
 
-                      <div className="bg-neutral-900/50 backdrop-blur-sm border border-white/5 rounded-2xl p-4 flex items-center gap-4 shrink-0">
-                        <button
-                          onClick={toggleSourcePlay}
-                          className="w-8 h-8 bg-white text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-transform shrink-0"
-                        >
-                          {isSourcePlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5 fill-current" />}
-                        </button>
-                        <div className="flex-1">
-                          <input
-                            type="range"
-                            min="0"
-                            max={activeSegment?.duration || 0}
-                            step="0.01"
-                            value={sourceTime}
-                            onChange={(e) => handleSourceSeek(parseFloat(e.target.value))}
-                            className="w-full appearance-none bg-white/10 h-1 rounded-full cursor-pointer accent-white"
+                  <div className={cn(
+                    "max-w-[1400px] mx-auto gap-8 flex-1 min-h-0",
+                    previewMode === "dual" ? "grid grid-cols-1 md:grid-cols-2" : "flex justify-center"
+                  )}>
+                    {/* Source Player */}
+                    {(previewMode === "dual" || activePreviewTab === "source") && (
+                      <div className={cn("flex flex-col gap-4 min-h-0", previewMode === "single" ? "w-full max-w-4xl" : "")}>
+                        <div className="relative flex-1 bg-black rounded-2xl overflow-hidden border border-neutral-800 group/player shadow-2xl">
+                          <video
+                            ref={videoRef}
+                            src={activeSegment?.url}
+                            className="w-full h-full object-contain"
+                            onTimeUpdate={handleSourceTimeUpdate}
                           />
+                          <div className="absolute top-4 left-4 font-black uppercase tracking-widest text-[10px] bg-black/60 px-3 py-1 rounded border border-white/10 backdrop-blur-md z-10">
+                            Master Source
+                          </div>
+                          
+                          {/* Embedded Seek Bar Overlay */}
+                          <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/80 to-transparent translate-y-2 opacity-0 group-hover/player:translate-y-0 group-hover/player:opacity-100 transition-all z-20">
+                            <div className="flex items-center gap-4">
+                              <button
+                                onClick={toggleSourcePlay}
+                                className="w-10 h-10 bg-white text-black rounded-full flex items-center justify-center hover:scale-110 active:scale-95 transition-transform shrink-0 shadow-xl"
+                              >
+                                {isSourcePlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5 fill-current" />}
+                              </button>
+                              <div className="flex-1 space-y-1">
+                                <div className="flex justify-between text-[8px] font-mono font-bold text-white/60 uppercase">
+                                  <span>{formatTime(sourceTime)}</span>
+                                  <span>{formatTime(activeSegment?.duration || 0)}</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max={activeSegment?.duration || 0}
+                                  step="0.01"
+                                  value={sourceTime}
+                                  onChange={(e) => handleSourceSeek(parseFloat(e.target.value))}
+                                  className="w-full appearance-none bg-white/20 h-1 rounded-full cursor-pointer accent-white hover:h-2 transition-all"
+                                />
+                              </div>
+                              <button 
+                                onClick={() => toggleFullscreen(videoRef)}
+                                className="p-2.5 bg-black/40 hover:bg-white/20 rounded-xl transition-all text-white backdrop-blur-md border border-white/10"
+                              >
+                                <Maximize size={16} />
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    )}
 
                     {/* Preview Player */}
-                    <div className="flex flex-col gap-4 min-h-0">
-                      <div className="relative flex-1 bg-neutral-900 rounded-2xl overflow-hidden border border-orange-500/30 group/player shadow-2xl">
-                        <video
-                          ref={previewRef}
-                          src={activeSegment?.url}
-                          className="w-full h-full object-contain"
-                          onTimeUpdate={handlePreviewTimeUpdate}
-                        />
-                        <div className="absolute top-4 left-4 font-black uppercase tracking-widest text-[10px] bg-orange-600 px-3 py-1 rounded text-white shadow-lg backdrop-blur-md">
-                          Trim Preview
-                        </div>
-                        <button 
-                          onClick={() => toggleFullscreen(previewRef)}
-                          className="absolute bottom-4 right-4 p-2.5 bg-black/60 hover:bg-orange-500 rounded-xl transition-all text-white opacity-0 group-hover/player:opacity-100 backdrop-blur-md border border-white/10"
-                        >
-                          <Maximize size={16} />
-                        </button>
-                      </div>
-
-                      <div className="bg-orange-500/5 backdrop-blur-sm border border-orange-500/20 rounded-2xl p-4 flex items-center gap-4 shrink-0">
-                        <button
-                          onClick={togglePreviewPlay}
-                          className="w-8 h-8 bg-orange-500 text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-transform shrink-0"
-                        >
-                          {isPreviewPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5 fill-current" />}
-                        </button>
-                        <div className="flex-1">
-                          <input
-                            type="range"
-                            min={activeRange?.start || 0}
-                            max={activeRange?.end || 0}
-                            step="0.01"
-                            value={previewTime}
-                            onChange={(e) => handlePreviewSeek(parseFloat(e.target.value))}
-                            className="w-full appearance-none bg-orange-500/20 h-1 rounded-full cursor-pointer accent-orange-500"
+                    {(previewMode === "dual" || activePreviewTab === "preview") && (
+                      <div className={cn("flex flex-col gap-4 min-h-0", previewMode === "single" ? "w-full max-w-4xl" : "")}>
+                        <div className="relative flex-1 bg-neutral-900 rounded-2xl overflow-hidden border border-orange-500/30 group/player shadow-2xl">
+                          <video
+                            ref={previewRef}
+                            src={activeSegment?.url}
+                            className="w-full h-full object-contain"
+                            onTimeUpdate={handlePreviewTimeUpdate}
                           />
+                          <div className="absolute top-4 left-4 font-black uppercase tracking-widest text-[10px] bg-orange-600 px-3 py-1 rounded text-white shadow-lg backdrop-blur-md z-10">
+                            Trim Preview
+                          </div>
+
+                          {/* Embedded Seek Bar Overlay */}
+                          <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-orange-950/60 to-transparent translate-y-2 opacity-0 group-hover/player:translate-y-0 group-hover/player:opacity-100 transition-all z-20">
+                            <div className="flex items-center gap-4">
+                              <button
+                                onClick={togglePreviewPlay}
+                                className="w-10 h-10 bg-orange-500 text-black rounded-full flex items-center justify-center hover:scale-110 active:scale-95 transition-transform shrink-0 shadow-xl"
+                              >
+                                {isPreviewPlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5 fill-current" />}
+                              </button>
+                              <div className="flex-1 space-y-1">
+                                <div className="flex justify-between text-[8px] font-mono font-bold text-orange-500/60 uppercase">
+                                  <span>{formatTime(previewTime - (activeRange?.start || 0))}</span>
+                                  <span>{formatTime((activeRange?.end || 0) - (activeRange?.start || 0))}</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={activeRange?.start || 0}
+                                  max={activeRange?.end || 0}
+                                  step="0.01"
+                                  value={previewTime}
+                                  onChange={(e) => handlePreviewSeek(parseFloat(e.target.value))}
+                                  className="w-full appearance-none bg-orange-500/30 h-1 rounded-full cursor-pointer accent-orange-500 hover:h-2 transition-all"
+                                />
+                              </div>
+                              <button 
+                                onClick={() => toggleFullscreen(previewRef)}
+                                className="p-2.5 bg-black/40 hover:bg-orange-500 rounded-xl transition-all text-white backdrop-blur-md border border-white/10"
+                              >
+                                <Maximize size={16} />
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 </motion.div>
                 
@@ -936,138 +1037,227 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  {/* Timeline */}
-                  <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-8">
-                    <div className="space-y-8">
-                      <div className="flex flex-wrap items-center justify-between gap-4">
-                        <div className="flex gap-2 bg-neutral-950 p-1 rounded-lg border border-white/5 overflow-x-auto max-w-full">
+                    <div 
+                      className={cn(
+                        "bg-neutral-900 border border-neutral-800 rounded-3xl overflow-hidden flex relative timeline-container",
+                        sidebarOrientation === "vertical" ? "flex-row" : "flex-col"
+                      )}
+                      style={{ height: sidebarOrientation === "vertical" ? `${timelineHeight}px` : "auto" }}
+                    >
+                      {/* Height Resize Handle (Bottom) */}
+                      <div
+                        className="absolute bottom-0 left-0 right-0 h-1 cursor-ns-resize bg-transparent hover:bg-orange-500/50 transition-colors z-[60]"
+                        onMouseDown={() => {
+                          isResizingTimeline.current = true;
+                          document.body.style.cursor = "ns-resize";
+                        }}
+                      />
+                      
+                      {/* Vertical Sidebar Controls - Constrained Height */}
+                      {/* Controls Sidebar/Bottom Bar */}
+                      <div className={cn(
+                        "shrink-0 bg-neutral-950 border-white/5 flex items-center z-50 transition-all duration-300",
+                        sidebarOrientation === "vertical" 
+                          ? "w-14 flex-col border-r py-6 gap-6 h-full" 
+                          : "w-full flex-row border-t px-6 gap-6 h-14 order-last"
+                      )}>
+                        <div className={cn("flex gap-2 shrink-0", sidebarOrientation === "vertical" ? "flex-col" : "flex-row")}>
                           <button
                             onClick={() => setShowAllMarkers(!showAllMarkers)}
                             className={cn(
-                              "px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded border transition-all flex items-center gap-2",
+                              "w-10 h-10 flex items-center justify-center rounded-xl border transition-all",
                               showAllMarkers
-                                ? "bg-orange-500 text-black border-orange-500"
-                                : "border-neutral-800 text-neutral-400 hover:border-white",
+                                ? "bg-orange-500 text-black border-orange-500 shadow-[0_0_15px_rgba(249,115,22,0.4)]"
+                                : "border-neutral-800 text-neutral-500 hover:border-white/20",
                             )}
-                            title="Show all markers on timeline"
+                            title="Show all markers"
                           >
-                            {showAllMarkers ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-                            All
+                            {showAllMarkers ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                           </button>
-                          <div className="w-[1px] bg-white/5 my-1 mx-1" />
+                          
+                          <button
+                            onClick={addMarker}
+                            className="w-10 h-10 flex items-center justify-center text-orange-500 hover:bg-white/10 rounded-xl border border-white/5 transition-all"
+                            title="Add Marker (Enter)"
+                          >
+                            <Plus className="w-4 h-4" />
+                          </button>
+
+                          {activeSegment && activeSegment.ranges.length > 1 && (
+                            <button
+                              onClick={() => deleteMarker(activeRange!.id)}
+                              className="w-10 h-10 flex items-center justify-center text-red-500 hover:bg-red-500/10 rounded-xl border border-white/5 transition-all"
+                              title="Delete Marker"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+
+                        <div className={cn("bg-white/5 shrink-0", sidebarOrientation === "vertical" ? "w-8 h-[1px]" : "h-8 w-[1px]")} />
+
+                        {/* Zoom Controls */}
+                        <div className={cn(
+                          "flex items-center bg-neutral-900/50 rounded-xl border border-white/5 p-1 gap-1 shrink-0",
+                          sidebarOrientation === "vertical" ? "flex-col" : "flex-row"
+                        )}>
+                          <button
+                            onClick={() => setZoom((z) => Math.min(z + 0.5, 10))}
+                            className="p-2 hover:text-orange-500 transition-colors"
+                            title="Zoom In"
+                          >
+                            <ZoomIn className="w-4 h-4" />
+                          </button>
+                          <span className={cn(
+                            "text-[8px] font-mono font-bold opacity-30 py-1",
+                            sidebarOrientation === "vertical" ? "origin-center -rotate-90" : "px-1"
+                          )}>
+                            {zoom.toFixed(1)}x
+                          </span>
+                          <button
+                            onClick={() => setZoom((z) => Math.max(z - 0.5, 1))}
+                            className="p-2 hover:text-orange-500 transition-colors"
+                            title="Zoom Out"
+                          >
+                            <ZoomOut className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        <div className={cn("bg-white/5 shrink-0", sidebarOrientation === "vertical" ? "w-8 h-[1px]" : "h-8 w-[1px]")} />
+
+                        {/* Marker List - Scrollable */}
+                        <div className={cn(
+                          "flex-1 flex gap-2 overflow-auto custom-scrollbar min-h-0 min-w-0 pb-1",
+                          sidebarOrientation === "vertical" ? "flex-col w-full px-2" : "flex-row items-center h-full"
+                        )}>
                           {activeSegment?.ranges.map((range, idx) => (
                             <button
                               key={range.id}
                               onClick={() => setActiveRangeIndex(idx)}
                               className={cn(
-                                "px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded border transition-all shrink-0",
+                                "flex items-center justify-center text-[10px] font-black rounded-lg transition-all shrink-0 border",
+                                sidebarOrientation === "vertical" ? "w-9 h-9" : "h-9 px-4",
                                 activeRangeIndex === idx
-                                  ? "bg-white text-black border-white"
-                                  : "border-transparent opacity-40 hover:opacity-100",
+                                  ? "bg-white text-black border-white shadow-lg"
+                                  : "bg-neutral-900 text-white/20 border-white/5 hover:text-white hover:bg-white/10",
                               )}
                             >
-                              Marker {idx + 1}
+                              {idx + 1}
                             </button>
                           ))}
-                          <button
-                            onClick={addMarker}
-                            className="w-10 h-10 flex items-center justify-center text-orange-500 hover:bg-white/10 rounded transition-colors shrink-0"
-                            title="Add Cut Marker (Enter)"
-                          >
-                            <Plus className="w-4 h-4" />
-                          </button>
-                        </div>
-
-                        <div className="flex items-center gap-4">
-                          <div className="flex bg-neutral-950 p-1 rounded-lg border border-white/5 border-orange-500/20">
-                            <button
-                              onClick={() => setZoom((z) => Math.max(z - 0.5, 1))}
-                              className="p-2 hover:text-orange-500 transition-colors opacity-60 hover:opacity-100"
-                            >
-                              <ZoomOut className="w-4 h-4" />
-                            </button>
-                            <span className="px-3 flex items-center text-[10px] font-mono font-bold opacity-30 uppercase tracking-widest">
-                              {zoom.toFixed(1)}x
-                            </span>
-                            <button
-                              onClick={() => setZoom((z) => Math.min(z + 0.5, 10))}
-                              className="p-2 hover:text-orange-500 transition-colors opacity-60 hover:opacity-100"
-                            >
-                              <ZoomIn className="w-4 h-4" />
-                            </button>
-                          </div>
-
-                          {activeSegment && activeSegment.ranges.length > 1 && (
-                            <button
-                              onClick={() => deleteMarker(activeRange!.id)}
-                              className="text-[10px] font-black uppercase tracking-widest text-red-500 opacity-60 hover:opacity-100 transition-opacity flex items-center gap-2"
-                            >
-                              <Trash2 className="w-3 h-3" /> Remove
-                            </button>
-                          )}
                         </div>
                       </div>
 
-                      <div className="relative h-32 bg-neutral-950 rounded-xl border border-white/5 overflow-x-auto custom-scrollbar group touch-pan-x">
-                        <div
-                          className="relative h-full transition-all duration-300 ease-out flex"
-                          style={{ width: `${100 * zoom}%`, minWidth: "100%" }}
-                        >
-                          {segments.map((seg, sIdx) => (
-                            <div 
-                              key={seg.id}
-                              className={cn(
-                                "h-full relative border-r border-white/10 flex transition-all cursor-pointer overflow-hidden",
-                                activeSegmentIndex === sIdx ? "bg-orange-500/10 ring-1 ring-inset ring-orange-500/50" : "opacity-40 hover:opacity-60"
-                              )}
-                              style={{ width: totalOriginalDuration > 0 ? `${(seg.duration / totalOriginalDuration) * 100}%` : "0%" }}
-                              onClick={() => setActiveSegmentIndex(sIdx)}
-                            >
-                              <div className="flex h-full min-w-full">
-                                {seg.thumbnails.map((thumb, tIdx) => (
-                                  <div key={tIdx} className="flex-1 border-r border-white/5 h-full overflow-hidden">
-                                    <img src={thumb} className="w-full h-full object-cover grayscale" />
-                                  </div>
-                                ))}
-                                {seg.type === "audio" && (
-                                  <div className="flex-1 flex items-center justify-center opacity-20">
-                                    <Music className="w-6 h-6" />
-                                  </div>
+                      {/* Main Timeline Content */}
+                      <div className="flex-1 min-w-0 flex flex-col">
+                        {/* Timeline Ruler - Taller for better clicking */}
+                        <div className="relative h-10 bg-neutral-900/40 border-b border-white/10 overflow-hidden group/ruler">
+                          <div 
+                            className="relative h-full flex items-end cursor-crosshair"
+                            style={{ width: `${100 * zoom}%`, minWidth: "100%" }}
+                            onClick={(e) => {
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              const x = e.clientX - rect.left;
+                              const percentage = x / rect.width;
+                              if (activeSegment) {
+                                handleSourceSeek(percentage * activeSegment.duration);
+                              }
+                            }}
+                          >
+                            {activeSegment && Array.from({ length: Math.ceil(activeSegment.duration) + 1 }).map((_, i) => (
+                              <div 
+                                key={i} 
+                                className="absolute bottom-0 border-l border-white/10 group pointer-events-none"
+                                style={{ 
+                                  left: `${(i / activeSegment.duration) * 100}%`,
+                                  height: i % 5 === 0 ? "100%" : "40%"
+                                }}
+                              >
+                                {i % 5 === 0 && (
+                                  <span className="absolute bottom-full left-1 text-[6px] font-mono font-bold opacity-20 group-hover:opacity-100 transition-opacity">
+                                    {formatTime(i)}
+                                  </span>
                                 )}
                               </div>
+                            ))}
+                          </div>
+                        </div>
 
-                              <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/60 rounded text-[6px] font-black uppercase tracking-tighter text-white/50 z-50">
-                                {seg.file.name.slice(0, 15)}
-                              </div>
+                         <div className="relative flex-1 bg-neutral-950 border-b border-white/5 overflow-x-auto custom-scrollbar group touch-pan-x min-h-0">
+                          <div
+                            className="relative h-full transition-all duration-300 ease-out flex"
+                            style={{ width: `${100 * zoom}%`, minWidth: "100%" }}
+                          >
+                            {/* Sticky Add Media Button - Styled like right button */}
+                            <label className="sticky left-0 z-[60] h-full w-32 flex flex-col items-center justify-center gap-2 bg-neutral-950/80 backdrop-blur-md border-r border-white/10 transition-all cursor-pointer group shrink-0">
+                               <Plus size={24} className="text-orange-500 group-hover:scale-125 transition-transform" />
+                               <span className="text-[10px] font-black uppercase tracking-widest opacity-40 group-hover:opacity-100">Add Media</span>
+                               <input type="file" multiple accept="video/*,image/*,audio/*" className="hidden" onChange={handleFileSelect} />
+                            </label>
 
-                              {activeSegmentIndex === sIdx && (
-                                <>
-                                  <div
-                                    className="absolute top-0 bottom-0 w-[2px] bg-white z-40 shadow-[0_0_10px_white] pointer-events-none"
-                                    style={{
-                                      left: `${(sourceTime / seg.duration) * 100}%`,
-                                    }}
-                                  />
-
-                                  {seg.ranges.map((range, rIdx) => (
-                                    <div
-                                      key={range.id}
-                                      className={cn(
-                                        "absolute h-full z-20",
-                                        activeRangeIndex === rIdx ? "bg-orange-500/20 border-x-2 border-orange-500" : "bg-white/5 border-x border-white/20 opacity-30"
-                                      )}
-                                      style={{
-                                        left: `${(range.start / seg.duration) * 100}%`,
-                                        width: `${((range.end - range.start) / seg.duration) * 100}%`,
-                                      }}
-                                    >
-                                       {(showAllMarkers || activeRangeIndex === rIdx) && (
-                                          <div className="absolute top-1 left-1 text-[8px] font-black opacity-40 uppercase">
-                                            #{rIdx + 1}
-                                          </div>
-                                       )}
+                            {segments.map((seg, sIdx) => (
+                              <div 
+                                key={seg.id}
+                                className={cn(
+                                  "h-full relative border-r border-white/10 flex transition-all cursor-pointer overflow-hidden",
+                                  activeSegmentIndex === sIdx ? "bg-orange-500/10 ring-1 ring-inset ring-orange-500/50" : "opacity-40 hover:opacity-60"
+                                )}
+                                style={{ width: totalOriginalDuration > 0 ? `${(seg.duration / totalOriginalDuration) * 100}%` : "0%" }}
+                                onClick={(e) => {
+                                  setActiveSegmentIndex(sIdx);
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  const x = e.clientX - rect.left;
+                                  const percentage = x / rect.width;
+                                  handleSourceSeek(percentage * seg.duration);
+                                }}
+                              >
+                                <div className="flex h-full min-w-full">
+                                  {seg.thumbnails.map((thumb, tIdx) => (
+                                    <div key={tIdx} className="flex-1 border-r border-white/5 h-full overflow-hidden">
+                                      <img src={thumb} className="w-full h-full object-cover grayscale" />
                                     </div>
                                   ))}
+                                  {seg.type === "audio" && (
+                                    <div className="flex-1 flex items-center justify-center opacity-20">
+                                      <Music className="w-6 h-6" />
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/60 rounded text-[6px] font-black uppercase tracking-tighter text-white/50 z-50">
+                                  {seg.file.name.slice(0, 15)}
+                                </div>
+
+                                {activeSegmentIndex === sIdx && (
+                                  <>
+                                    <div
+                                      className="absolute top-0 bottom-0 w-[2px] bg-white z-40 shadow-[0_0_10px_white] pointer-events-none"
+                                      style={{
+                                        left: `${(sourceTime / seg.duration) * 100}%`,
+                                      }}
+                                    />
+
+                                    {seg.ranges.map((range, rIdx) => (
+                                      <div
+                                        key={range.id}
+                                        className={cn(
+                                          "absolute h-full z-20 transition-colors",
+                                          activeRangeIndex === rIdx 
+                                            ? "bg-orange-500/40 border-x-[3px] border-orange-500 shadow-[0_0_15px_rgba(249,115,22,0.3)]" 
+                                            : "bg-orange-500/10 border-x border-orange-500/30 opacity-60"
+                                        )}
+                                        style={{
+                                          left: `${(range.start / seg.duration) * 100}%`,
+                                          width: `${((range.end - range.start) / seg.duration) * 100}%`,
+                                        }}
+                                      >
+                                         {(showAllMarkers || activeRangeIndex === rIdx) && (
+                                            <div className="absolute top-1 left-2 bg-orange-500 text-black px-1 rounded text-[8px] font-black uppercase shadow-lg">
+                                              #{rIdx + 1}
+                                            </div>
+                                         )}
+                                      </div>
+                                    ))}
 
                                   {activeRange && (
                                     <>
@@ -1103,34 +1293,41 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        <div className="bg-neutral-950 p-6 rounded-2xl border border-white/5 space-y-4">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-black uppercase tracking-widest opacity-30">Mark In</span>
-                            <Scissors className="w-3 h-3 text-orange-500 opacity-40 hover:opacity-100 cursor-pointer" onClick={() => updateRangeStart(sourceTime)} />
-                          </div>
-                          <div className="space-y-4">
-                            <span className="text-4xl font-mono font-black italic tracking-tighter tabular-nums block">
+                      {/* Integrated Controls Below Ruler */}
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 p-2 bg-neutral-950/50 rounded-b-xl border-x border-b border-white/5">
+                        <div className="bg-neutral-900/50 p-4 rounded-lg border border-white/5 flex items-center justify-between group hover:border-orange-500/50 transition-all">
+                          <div className="flex flex-col">
+                            <span className="text-[8px] font-black uppercase tracking-widest opacity-30">Mark In</span>
+                            <span className="text-xl font-mono font-black italic tracking-tighter tabular-nums text-white group-hover:text-orange-500">
                               {formatTime(activeRange?.start || 0)}
                             </span>
-                            <input type="number" step="0.01" value={activeRange?.start || 0} onChange={(e) => updateRangeStart(parseFloat(e.target.value))} className="w-full bg-neutral-900 border border-white/5 rounded p-2 text-[10px] font-mono font-bold focus:border-orange-500 outline-none" />
                           </div>
+                          <button 
+                            onClick={() => updateRangeStart(sourceTime)}
+                            className="p-3 bg-white/5 hover:bg-orange-500 rounded-full transition-all text-white/40 hover:text-white"
+                          >
+                            <Scissors size={14} />
+                          </button>
                         </div>
-                        <div className="bg-neutral-950 p-6 rounded-2xl border border-white/5 space-y-4">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-black uppercase tracking-widest opacity-30">Mark Out</span>
-                            <Scissors className="w-3 h-3 text-orange-500 opacity-40 hover:opacity-100 cursor-pointer rotate-180" onClick={() => updateRangeEnd(sourceTime)} />
-                          </div>
-                          <div className="space-y-4">
-                            <span className="text-4xl font-mono font-black italic tracking-tighter tabular-nums block">
+
+                        <div className="bg-neutral-900/50 p-4 rounded-lg border border-white/5 flex items-center justify-between group hover:border-orange-500/50 transition-all">
+                          <div className="flex flex-col">
+                            <span className="text-[8px] font-black uppercase tracking-widest opacity-30">Mark Out</span>
+                            <span className="text-xl font-mono font-black italic tracking-tighter tabular-nums text-white group-hover:text-orange-500">
                               {formatTime(activeRange?.end || 0)}
                             </span>
-                            <input type="number" step="0.01" value={activeRange?.end || 0} onChange={(e) => updateRangeEnd(parseFloat(e.target.value))} className="w-full bg-neutral-900 border border-white/5 rounded p-2 text-[10px] font-mono font-bold focus:border-orange-500 outline-none" />
                           </div>
+                          <button 
+                            onClick={() => updateRangeEnd(sourceTime)}
+                            className="p-3 bg-white/5 hover:bg-orange-500 rounded-full transition-all text-white/40 hover:text-white"
+                          >
+                            <Scissors size={14} className="rotate-180" />
+                          </button>
                         </div>
-                        <div className="bg-neutral-100/5 p-6 rounded-2xl border border-orange-500/20 space-y-2 flex flex-col justify-center">
-                          <span className="text-[10px] font-black uppercase tracking-widest text-orange-500 block">Trim Duration</span>
-                          <span className="text-4xl font-mono font-black italic tracking-tighter tabular-nums">
+
+                        <div className="bg-orange-500/5 p-4 rounded-lg border border-orange-500/20 flex flex-col justify-center">
+                          <span className="text-[8px] font-black uppercase tracking-widest text-orange-500/60 block">Trim Duration</span>
+                          <span className="text-xl font-mono font-black italic tracking-tighter tabular-nums text-orange-500">
                             {formatTime((activeRange?.end || 0) - (activeRange?.start || 0))}
                           </span>
                         </div>
@@ -1217,24 +1414,36 @@ export default function App() {
                       </div>
                     </div>
 
-                    <button
-                      onClick={handleTrim}
-                      disabled={isProcessing || segments.length === 0}
-                      className={cn("w-full py-10 text-2xl font-black uppercase tracking-[0.5em] italic transition-all relative overflow-hidden group rounded-sm", isProcessing ? "bg-neutral-800 text-neutral-600" : "bg-orange-500 text-black hover:bg-white active:scale-[0.99] shadow-[0_20px_50px_rgba(249,115,22,0.3)]")}
-                    >
-                      {isProcessing ? (
-                      <div className="flex items-center justify-center gap-6">
-                        <Loader2 className="w-8 h-8 animate-spin" />
-                        <span>Rendering Pipeline Buffer</span>
-                        <div className="absolute bottom-0 left-0 h-1.5 bg-white transition-all duration-300" style={{ width: `${progress}%` }} />
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-center gap-6">
-                        <Download className="w-8 h-8" />
-                        <span>Compile & Commit Output</span>
-                      </div>
+                    <div className="relative group">
+                      <button
+                        onClick={handleTrim}
+                        disabled={isProcessing || segments.length === 0}
+                        className={cn("w-full py-10 text-2xl font-black uppercase tracking-[0.5em] italic transition-all relative overflow-hidden group rounded-sm", isProcessing ? "bg-neutral-800 text-neutral-600" : "bg-orange-500 text-black hover:bg-white active:scale-[0.99] shadow-[0_20px_50px_rgba(249,115,22,0.3)]")}
+                      >
+                        {isProcessing ? (
+                        <div className="flex items-center justify-center gap-6">
+                          <Loader2 className="w-8 h-8 animate-spin" />
+                          <span>Rendering Pipeline Buffer</span>
+                          <div className="absolute bottom-0 left-0 h-1.5 bg-white transition-all duration-300" style={{ width: `${progress}%` }} />
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center gap-6">
+                          <Download className="w-8 h-8" />
+                          <span>Compile & Commit Output</span>
+                        </div>
+                      )}
+                    </button>
+                    
+                    {isProcessing && (
+                      <button 
+                        onClick={() => setShowCancelConfirm(true)}
+                        className="absolute -top-4 -right-4 w-12 h-12 bg-red-600 text-white rounded-full flex items-center justify-center hover:bg-red-500 hover:scale-110 active:scale-95 transition-all shadow-xl z-[70] border-4 border-neutral-900"
+                        title="Cancel Rendering"
+                      >
+                        <Plus className="w-6 h-6 rotate-45" />
+                      </button>
                     )}
-                  </button>
+                  </div>
                 </div>
               </>
             )}
@@ -1297,8 +1506,15 @@ export default function App() {
                   )}
                 >
                   <div className="flex items-center gap-4 relative z-10">
-                    <div className="w-12 h-12 bg-neutral-950 rounded-lg overflow-hidden shrink-0 border border-white/5">
-                      {seg.thumbnails[0] ? (
+                    <div className="w-12 h-12 bg-neutral-950 rounded-lg overflow-hidden shrink-0 border border-white/5 relative">
+                      {seg.status === 'processing' ? (
+                        <div className="w-full h-full flex flex-col items-center justify-center bg-orange-500/10">
+                          <Loader2 size={16} className="text-orange-500 animate-spin mb-1" />
+                          <span className="text-[8px] font-mono font-black text-orange-500">
+                            {seg.loadProgress}%
+                          </span>
+                        </div>
+                      ) : seg.thumbnails[0] ? (
                         <img src={seg.thumbnails[0]} className="w-full h-full object-cover" />
                       ) : (
                         <div className="w-full h-full flex items-center justify-center opacity-20">
@@ -1381,6 +1597,13 @@ export default function App() {
                       </div>
                       <div className="flex gap-2 mt-4">
                         <button
+                          onClick={() => setActiveVaultVideo(v)}
+                          className="w-10 h-10 flex items-center justify-center bg-orange-500 text-black rounded hover:bg-white transition-all"
+                          title="Play Video"
+                        >
+                          <Play className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => downloadVideo(v)}
                           className="flex-1 py-2 bg-neutral-950 hover:bg-white hover:text-black rounded text-[8px] font-black uppercase tracking-widest transition-all"
                         >
@@ -1418,7 +1641,7 @@ export default function App() {
       {/* Settings Modal */}
       <AnimatePresence>
         {showSettings && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[200] flex items-center justify-end p-8">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -1473,6 +1696,89 @@ export default function App() {
                   Press any key inside the input box to remap. Keyboard control
                   is disabled while typing in numeric fields.
                 </p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+       {/* Cancel Confirmation Modal */}
+      <AnimatePresence>
+        {showCancelConfirm && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/90 backdrop-blur-xl"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-neutral-900 border border-red-500/50 w-full max-w-md rounded-3xl p-10 relative shadow-2xl space-y-8 text-center"
+            >
+              <div className="w-20 h-20 bg-red-500/20 rounded-full flex items-center justify-center mx-auto">
+                <AlertCircle className="w-10 h-10 text-red-500" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-2xl font-black uppercase tracking-tighter italic">Abort Rendering?</h3>
+                <p className="text-xs font-bold uppercase tracking-widest opacity-40 leading-relaxed">
+                  All progress will be lost. This process cannot be resumed.
+                </p>
+              </div>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setShowCancelConfirm(false)}
+                  className="flex-1 py-4 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                >
+                  Continue Render
+                </button>
+                <button
+                  onClick={() => {
+                    window.location.reload(); // Hard reset for FFmpeg safety
+                  }}
+                  className="flex-1 py-4 bg-red-600 hover:bg-red-500 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                >
+                  Confirm Abort
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Vault Video Player Modal */}
+      <AnimatePresence>
+        {activeVaultVideo && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center p-10">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setActiveVaultVideo(null)}
+              className="absolute inset-0 bg-black/95 backdrop-blur-2xl"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full max-w-5xl aspect-video bg-black rounded-3xl overflow-hidden relative shadow-2xl border border-white/5"
+            >
+              <video 
+                src={URL.createObjectURL(activeVaultVideo.blob)} 
+                controls 
+                autoPlay 
+                className="w-full h-full"
+              />
+              <button
+                onClick={() => setActiveVaultVideo(null)}
+                className="absolute top-6 right-6 w-12 h-12 rounded-full bg-black/50 hover:bg-white/20 flex items-center justify-center transition-colors text-white z-50 backdrop-blur-md"
+              >
+                <Plus className="w-6 h-6 rotate-45" />
+              </button>
+              <div className="absolute bottom-6 left-6 px-6 py-3 bg-black/50 backdrop-blur-md rounded-xl border border-white/10">
+                <p className="text-xs font-black uppercase tracking-widest italic">{activeVaultVideo.name}</p>
               </div>
             </motion.div>
           </div>
